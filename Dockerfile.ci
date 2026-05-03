@@ -45,7 +45,7 @@ RUN ORT_VER=$(python3 -c "import onnxruntime; print(onnxruntime.__version__)") &
     : > "$STUB/RECORD"
 
 # Copy application code and the PyTorch weights
-COPY src/inference_node.py .
+COPY inference_node.py .
 RUN mkdir -p /opt/models
 COPY best.pt /opt/models/
 

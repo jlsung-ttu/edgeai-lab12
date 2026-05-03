@@ -1,42 +1,51 @@
 #!/usr/bin/env bash
-# entrypoint.sh — runtime startup for the Lab 12 inference container.
-#
-# Why this exists:
-#   The TensorRT engine compile (yolo export format=engine) needs a real
-#   GPU. We can't run it during `docker build` because the build happens
-#   on a GitHub-hosted x86 runner under QEMU ARM64 emulation, where no
-#   GPU is exposed. Instead we defer the compile until the first time
-#   the container actually starts on the Jetson.
+# entrypoint.sh — runs at container start on the Jetson.
 #
 # What it does:
-#   1. If best.engine is missing in /opt/models, compile it from best.pt
-#      (one-time, ~5-8 min).
-#   2. exec the CMD passed by Docker (default: python3 inference_node.py).
+#   1. If best.engine is missing or older than best.pt, compile it with
+#      Ultralytics' yolo export. This needs the GPU (--runtime nvidia)
+#      and uses the container's TensorRT 10.3.
+#   2. exec inference_node.py so signals (SIGTERM from `docker stop`)
+#      are delivered to the Python process, not to bash.
 #
-# Caching:
-#   /opt/models is the canonical location. To avoid re-compiling on every
-#   container restart, mount /opt/models from a host volume:
-#     docker run -v /opt/edgeai/models:/opt/models ...
-#   The first container build compiles the engine; subsequent containers
-#   on the same host see best.engine and skip the compile.
+# Why deferred to runtime instead of `RUN` in the Dockerfile?
+#   QEMU emulation on the GitHub-hosted x86 runner can fake aarch64
+#   instructions but cannot present a CUDA device, so `yolo export
+#   format=engine` would fail at build time. Running it at container
+#   start on the Jetson sidesteps the issue and matches production
+#   practice — engines are host-specific anyway (driver/TRT version
+#   on the build host must match the run host, so binding the compile
+#   to first run guarantees they match).
+#
+# First run takes 5–8 min. Mount /opt/models as a volume so subsequent
+# runs reuse the cached engine:
+#   docker run -v lab12-models:/opt/models ...
+
 set -euo pipefail
 
 MODEL_DIR=/opt/models
-ENGINE_FILE="${MODEL_DIR}/best.engine"
-WEIGHTS_FILE="${MODEL_DIR}/best.pt"
+WEIGHTS=${MODEL_DIR}/best.pt
+ENGINE=${MODEL_DIR}/best.engine
 
-if [ ! -f "$ENGINE_FILE" ]; then
-    if [ ! -f "$WEIGHTS_FILE" ]; then
-        echo "ERROR: $WEIGHTS_FILE not found. Image build is broken." >&2
-        exit 1
-    fi
-    echo "[entrypoint] First start: compiling TensorRT engine (one-time, ~5-8 min)..."
-    cd "$MODEL_DIR"
-    python3 -c "from ultralytics import YOLO; YOLO('best.pt', task='detect').export(format='engine', imgsz=320, half=True, opset=19)"
-    echo "[entrypoint] Engine compiled: $ENGINE_FILE"
-else
-    echo "[entrypoint] Cached engine found at $ENGINE_FILE — skipping compile."
+if [ ! -f "${WEIGHTS}" ]; then
+  echo "ERROR: ${WEIGHTS} not found. Did you copy best.pt into the image?" >&2
+  exit 1
 fi
 
-# Hand off to whatever CMD the image specifies (default: inference_node.py)
-exec "$@"
+# Recompile if engine is missing or older than weights
+if [ ! -f "${ENGINE}" ] || [ "${WEIGHTS}" -nt "${ENGINE}" ]; then
+  echo "[entrypoint] Compiling TensorRT engine (this takes 5–8 min on first boot)..."
+  cd "${MODEL_DIR}"
+  python3 -c "
+from ultralytics import YOLO
+YOLO('best.pt', task='detect').export(format='engine', imgsz=320, half=True, opset=19)
+"
+  echo "[entrypoint] Engine compiled: $(ls -lh ${ENGINE} | awk '{print $5}')"
+else
+  echo "[entrypoint] Reusing cached engine: $(ls -lh ${ENGINE} | awk '{print $5}')"
+fi
+
+# exec replaces the bash process so docker stop sends SIGTERM directly
+# to Python, which lets graceful-shutdown handlers in inference_node.py
+# actually run.
+exec python3 /app/inference_node.py "$@"

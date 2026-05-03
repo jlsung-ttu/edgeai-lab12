@@ -1,0 +1,56 @@
+# Lab 12 CI workflow — runs on every push and PR to any branch.
+# Two jobs:
+#   1. lint   — ruff check (style + import order + obvious bugs)
+#   2. test   — pytest on the smoke tests in tests/
+# Both run on the free GitHub-hosted ubuntu-latest x86 runner.
+# The Docker build (Step 3) and on-device pull (Step 4) come later.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]   # any branch
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff==0.6.9
+
+      - name: Run ruff
+        # --output-format=github makes errors show up as inline annotations
+        # on the PR diff, not just in the log.
+        run: ruff check . --output-format=github
+
+  test:
+    name: Pytest smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install test deps
+        # We deliberately don't pip-install requirements.txt here — most of
+        # those packages need a Jetson + CUDA wheel that doesn't exist on
+        # x86. The smoke tests only need pytest itself.
+        run: pip install pytest==8.3.3
+
+      - name: Run pytest
+        run: pytest tests/ -v

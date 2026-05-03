@@ -1,4 +1,12 @@
-# Dockerfile.single — Single-stage build (intentionally bloated for comparison)
+# Dockerfile.ci — Multi-arch CI build for the Lab 10 inference node.
+#
+# Key difference from Lab 10's Dockerfile.single:
+#   The TensorRT engine compile (yolo export format=engine) is NOT done at
+#   build time. It runs at container startup via entrypoint.sh, so the
+#   image can be built on a generic GitHub-hosted x86 runner under QEMU
+#   ARM64 emulation (which has no GPU). The engine is compiled the first
+#   time the container starts on a real Jetson, then cached on a host
+#   bind-mounted volume so subsequent runs skip the 5-8 min compile.
 FROM dustynv/pytorch:2.7-r36.4.0
 
 # The dustynv image ships with pip pre-configured to use a private NVIDIA
@@ -33,7 +41,7 @@ RUN ORT_VER=$(python3 -c "import onnxruntime; print(onnxruntime.__version__)") &
     STUB=/usr/local/lib/python3.10/dist-packages/onnxruntime_gpu-${ORT_VER}.dist-info && \
     mkdir -p "$STUB" && \
     printf "Metadata-Version: 2.1\nName: onnxruntime-gpu\nVersion: %s\n" "$ORT_VER" > "$STUB/METADATA" && \
-    echo "Wheel-Version: 1.0\nGenerator: lab10-stub\nRoot-Is-Purelib: true" > "$STUB/WHEEL" && \
+    echo "Wheel-Version: 1.0\nGenerator: lab12-stub\nRoot-Is-Purelib: true" > "$STUB/WHEEL" && \
     : > "$STUB/RECORD"
 
 # Copy application code and the PyTorch weights
@@ -41,11 +49,12 @@ COPY src/inference_node.py .
 RUN mkdir -p /opt/models
 COPY best.pt /opt/models/
 
-# Compile the TensorRT engine inside the container so it matches the
-# container's TRT version (10.3), not the host's (10.7). First build takes
-# 5–8 min; result is cached in this image layer for all future builds.
-RUN cd /opt/models && \
-    python3 -c "from ultralytics import YOLO; \
-                YOLO('best.pt', task='detect').export(format='engine', imgsz=320, half=True, opset=19)"
+# Copy the runtime entrypoint that compiles the TRT engine on first start.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# entrypoint.sh runs once per container start: it compiles best.engine if
+# missing, then execs the inference node. CMD args are passed through to
+# inference_node.py.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["python3", "inference_node.py"]
